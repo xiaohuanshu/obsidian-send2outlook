@@ -1,85 +1,114 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { marked } from 'marked';
+import { exec } from 'child_process';
 
 // Remember to rename these classes and interfaces!
 
-interface MyPluginSettings {
-	mySetting: string;
+interface Send2OutlookPluginSettings {
+	// 默认收件人
+	defaultRecipient: string;
+	// 默认抄送
+	defaultCc: string;
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+const DEFAULT_SETTINGS: Send2OutlookPluginSettings = {
+	defaultRecipient: '',
+	defaultCc: '',
 }
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class Send2OutlookPlugin extends Plugin {
+	settings: Send2OutlookPluginSettings;
+
+	setupEditorMenuEntry() {
+		// 创建选项菜单
+		this.registerEvent(this.app.workspace.on("file-menu", (menu, file, view) => {
+			menu.addItem((item) => {
+				item.setTitle("Send to Outlook").setIcon("clipboard-copy").onClick(async () => {
+					this.sendEmail();
+				});
+			});
+		}));
+	}
 
 	async onload() {
 		await this.loadSettings();
+		this.setupEditorMenuEntry();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
 		// This adds an editor command that can perform some operation on the current editor instance
 		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
+			id: 'send-to-outlook',
+			name: 'Send To Outlook',
 			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
+				this.sendEmail();
 			}
 		});
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+		this.addSettingTab(new Send2OutlookPluginSettingTab(this.app, this));
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
 	}
 
 	onunload() {
 
+	}
+
+	sendEmail() {
+		const noteFile = this.app.workspace.getActiveFile(); // Currently Open Note
+		if (!noteFile) return; // Nothing Open
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		// Make sure the user is editing a Markdown file.
+		if (!view) return;
+		// 获取笔记标题
+		const title = noteFile.basename;
+		// 获取笔记内容
+		const text = view.editor.getDoc().getValue()
+		// 渲染markdown
+		const html = this.renderMarkdown(text);
+		//发送
+		this.callOutlook(title, html);
+	}
+
+	callOutlook(title: string, html: string) {
+		const recipientEmail = this.settings.defaultRecipient;
+		const ccEmail = this.settings.defaultCc;
+		// 调用Applescript
+		let script = `
+		tell application "Microsoft Outlook"
+			set emailSubject to "${title}"
+			set emailContent to "${html.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"
+			set newEmail to make new outgoing message with properties {subject:emailSubject, content:emailContent}`;
+		if (recipientEmail !== "") {
+			const recipientEmails = recipientEmail.split(';');
+			recipientEmails.forEach(email => {
+				script += `
+            make new recipient at newEmail with properties {email address:{address:"${email.trim()}"}}`;
+			});
+		}
+
+		if (ccEmail !== "") {
+			const ccEmails = ccEmail.split(';');
+			ccEmails.forEach(email => {
+				script += `
+				make new cc recipient at newEmail with properties {email address:{address:"${email.trim()}"}}`;
+			});
+		}
+
+		script += `
+    		open newEmail
+			activate
+		end tell`;
+		// 执行Applescript
+		exec(`osascript -e '${script}'`, (err: any, stdout: any, stderr: any) => {
+			if (err) {
+				new Notice('Error: ' + err);
+				return;
+			}
+			console.log(stdout);
+		});
+	}
+
+	renderMarkdown(text: string) {
+		return marked(text);
 	}
 
 	async loadSettings() {
@@ -91,43 +120,37 @@ export default class MyPlugin extends Plugin {
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+class Send2OutlookPluginSettingTab extends PluginSettingTab {
+	plugin: Send2OutlookPlugin;
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: Send2OutlookPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
 	display(): void {
-		const {containerEl} = this;
+		const { containerEl } = this;
 
 		containerEl.empty();
 
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
+			.setName('默认收件人')
+			.setDesc('使用Outlook发送邮件时默认的收件人')
 			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
+				.setPlaceholder('设置默认收件人')
+				.setValue(this.plugin.settings.defaultRecipient)
 				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
+					this.plugin.settings.defaultRecipient = value;
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName('默认抄送')
+			.setDesc('使用Outlook发送邮件时默认的抄送人')
+			.addText(text => text
+				.setPlaceholder('设置默认抄送人')
+				.setValue(this.plugin.settings.defaultCc)
+				.onChange(async (value) => {
+					this.plugin.settings.defaultCc = value;
 					await this.plugin.saveSettings();
 				}));
 	}
